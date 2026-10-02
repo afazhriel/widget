@@ -1,0 +1,4253 @@
+export function mount(container, { title, config }) {
+  const cameraNumber = Number(config?.cameraNumber) === 1 ? 1 : 1;
+const cameraName = `CAM ${cameraNumber}`;
+  const deviceId = String(
+    config?.deviceId || "6a9a92dc77af7b3e8202103b"
+  );
+
+  /*
+   * MASUKKAN TOKEN PLAYBACK BARU ANJEUN DI IEU.
+   * Token heubeul anu kungsi ditempel dina source
+   * ulah dipaké deui.
+   */
+  const playbackToken =
+    "HmIBW3o2Z3WAdhRkh68cyDIm_IFwdXb53hz9k0qMf74";
+  const alarmToken =
+  "19332023aAbC";
+
+  const telemetryEndpoint =
+    `/api/last-telemetry?id=${encodeURIComponent(deviceId)}`;
+
+  const logoUrl =
+    "https://app.iotizen.com/api/d/48531bbf-a230-4667-844d-6b539019bc07.png";
+
+  const HLS_JS_URL =
+    "https://cdn.jsdelivr.net/npm/hls.js@1.7.3/dist/hls.min.js";
+
+  const TELEMETRY_INTERVAL = 5000;
+
+
+  /* ============================================================
+     STATE
+     ============================================================ */
+
+  let destroyed = false;
+  let currentMode = "live";
+
+  let currentCctvPublicUrl = "";
+  let currentPlaybackPublicUrl = "";
+  let currentAlarmPublicUrl = "";
+  let liveRunning = false;
+  let liveHls = null;
+
+  let playbackHls = null;
+  let playbackStopUrl = "";
+  let playbackStarting = false;
+
+  let telemetryTimer = null;
+
+  let playbackExpectedDuration = 0;
+
+
+  /* ============================================================
+     HELPERS
+     ============================================================ */
+
+  const sleep =
+    ms =>
+      new Promise(
+        resolve =>
+          setTimeout(resolve, ms)
+      );
+
+
+  function authHeaders() {
+    return {
+      Authorization:
+        `Bearer ${playbackToken}`
+    };
+  }
+
+
+  function formatDuration(seconds) {
+
+    const safe =
+      Math.max(
+        0,
+        Math.floor(
+          Number(seconds) || 0
+        )
+      );
+
+    const hours =
+      Math.floor(
+        safe / 3600
+      );
+
+    const minutes =
+      Math.floor(
+        (safe % 3600) / 60
+      );
+
+    const secs =
+      safe % 60;
+
+
+    if (hours > 0) {
+
+      return (
+        `${String(hours).padStart(2, "0")}:` +
+        `${String(minutes).padStart(2, "0")}:` +
+        `${String(secs).padStart(2, "0")}`
+      );
+
+    }
+
+
+    return (
+      `${String(minutes).padStart(2, "0")}:` +
+      `${String(secs).padStart(2, "0")}`
+    );
+
+  }
+
+
+  function parsePlaybackDuration() {
+
+    const start =
+      playbackStart.value;
+
+    const end =
+      playbackEnd.value;
+
+
+    if (
+      !start ||
+      !end
+    ) {
+
+      return 0;
+
+    }
+
+
+    const [
+      startHour,
+      startMinute
+    ] =
+      start
+        .split(":")
+        .map(Number);
+
+
+    const [
+      endHour,
+      endMinute
+    ] =
+      end
+        .split(":")
+        .map(Number);
+
+
+    const startSeconds =
+      (
+        startHour * 3600
+      ) +
+      (
+        startMinute * 60
+      );
+
+
+    const endSeconds =
+      (
+        endHour * 3600
+      ) +
+      (
+        endMinute * 60
+      );
+
+
+    return (
+      endSeconds -
+      startSeconds
+    );
+
+  }
+
+
+  /* ============================================================
+     ROOT
+     ============================================================ */
+
+  container.innerHTML = "";
+
+  container.style.cssText = `
+    width:100%;
+    height:100%;
+    min-height:0;
+    position:relative;
+    overflow:hidden;
+    background:#000;
+  `;
+
+
+  const root =
+    document.createElement("div");
+
+
+  root.className =
+    "iotz-cctv-widget";
+
+
+  root.style.cssText = `
+    position:absolute;
+    inset:0;
+
+    width:100%;
+    height:100%;
+
+    display:flex;
+    flex-direction:column;
+
+    overflow:hidden;
+
+    border-radius:8px;
+
+    background:#f8fafc;
+    color:#0f172a;
+
+    box-sizing:border-box;
+
+    font-family:
+      Inter,
+      -apple-system,
+      BlinkMacSystemFont,
+      "Segoe UI",
+      sans-serif;
+  `;
+
+
+  container.appendChild(root);
+
+
+  /* ============================================================
+     HTML
+     ============================================================ */
+
+  root.innerHTML = `
+
+    <style>
+
+      .iotz-cctv-widget * {
+        box-sizing:border-box;
+      }
+
+      .iotz-cctv-widget button,
+      .iotz-cctv-widget input {
+        font:inherit;
+      }
+
+      .iotz-cctv-widget button {
+        cursor:pointer;
+      }
+
+      .iotz-cctv-widget button:disabled {
+        opacity:.55;
+        cursor:not-allowed;
+      }
+
+
+      /* HEADER */
+
+      .iotz-header {
+        height:50px;
+        min-height:50px;
+
+        display:flex;
+        align-items:center;
+        justify-content:space-between;
+
+        gap:10px;
+
+        padding:0 10px 0 12px;
+
+        background:#fff;
+
+        border-bottom:
+          1px solid #e5e7eb;
+      }
+
+      .iotz-logo {
+        height:38px;
+        width:auto;
+
+        max-width:210px;
+
+        object-fit:contain;
+      }
+
+      .iotz-header-right {
+        display:flex;
+        align-items:center;
+
+        gap:8px;
+      }
+
+      .iotz-camera-name {
+        color:#16a34a;
+
+        font-size:10px;
+        font-weight:800;
+
+        letter-spacing:.7px;
+
+        white-space:nowrap;
+      }
+
+      .iotz-icon-button {
+        width:32px;
+        height:32px;
+
+        display:flex;
+        align-items:center;
+        justify-content:center;
+
+        padding:0;
+
+        border:0;
+        border-radius:6px;
+
+        background:transparent;
+
+        color:#475569;
+      }
+
+
+      /* MODE */
+
+      .iotz-modebar {
+        height:44px;
+        min-height:44px;
+
+        display:flex;
+        align-items:center;
+
+        gap:6px;
+
+        padding:6px 10px;
+
+        background:#fff;
+
+        border-bottom:
+          1px solid #e5e7eb;
+      }
+
+      .iotz-mode-button {
+        height:31px;
+
+        display:flex;
+        align-items:center;
+        justify-content:center;
+
+        gap:6px;
+
+        padding:0 12px;
+
+        border:
+          1px solid #e2e8f0;
+
+        border-radius:7px;
+
+        background:#fff;
+
+        color:#475569;
+
+        font-size:10px;
+        font-weight:800;
+      }
+
+      .iotz-mode-button.live-active {
+        background:#ecfdf5;
+
+        border-color:#86efac;
+
+        color:#15803d;
+      }
+
+      .iotz-mode-button.playback-active {
+        background:#eff6ff;
+
+        border-color:#93c5fd;
+
+        color:#1d4ed8;
+      }
+
+
+      /* CONTENT */
+
+      .iotz-content {
+        position:relative;
+
+        flex:1 1 auto;
+
+        min-height:0;
+
+        overflow:hidden;
+
+        background:#000;
+      }
+
+      .iotz-view {
+        position:absolute;
+        inset:0;
+      }
+
+
+      /* LIVE */
+
+      .iotz-live-view {
+        display:flex;
+        flex-direction:column;
+
+        background:#000;
+      }
+
+      .iotz-live-player {
+        position:relative;
+
+        flex:1 1 auto;
+
+        min-height:0;
+
+        overflow:hidden;
+
+        background:#000;
+      }
+
+      .iotz-live-video {
+        position:absolute;
+        inset:0;
+
+        width:100%;
+        height:100%;
+
+        display:none;
+
+        margin:0;
+        padding:0;
+
+        border:0;
+
+        background:#000;
+
+        object-fit:contain;
+      }
+
+
+      .iotz-placeholder {
+        position:absolute;
+        inset:0;
+
+        z-index:5;
+
+        display:flex;
+        flex-direction:column;
+
+        align-items:center;
+        justify-content:center;
+
+        gap:10px;
+
+        padding:20px;
+
+        background:
+          linear-gradient(
+            145deg,
+            #111827,
+            #1f2937
+          );
+
+        color:#fff;
+
+        text-align:center;
+      }
+
+      .iotz-placeholder-icon {
+        width:52px;
+        height:52px;
+
+        display:flex;
+        align-items:center;
+        justify-content:center;
+
+        border:
+          1px solid #475569;
+
+        border-radius:50%;
+
+        color:#94a3b8;
+      }
+
+      .iotz-placeholder-title {
+        font-size:13px;
+        font-weight:800;
+      }
+
+      .iotz-placeholder-description {
+        color:#94a3b8;
+
+        font-size:10px;
+      }
+
+      .iotz-loading {
+        position:absolute;
+        inset:0;
+
+        z-index:10;
+
+        display:none;
+
+        align-items:center;
+        justify-content:center;
+
+        background:rgba(17,24,39,.72);
+
+        color:#fff;
+
+        font-size:11px;
+
+        pointer-events:none;
+      }
+
+
+      /* ACTION BUTTONS */
+
+      .iotz-actionbar,
+      .iotz-playback-actionbar {
+        position:relative;
+
+        z-index:20;
+
+        min-height:43px;
+
+        display:flex;
+        align-items:center;
+
+        gap:6px;
+
+        padding:6px 8px;
+
+        background:#fff;
+      }
+
+      .iotz-actionbar {
+        border-top:
+          1px solid #e5e7eb;
+      }
+
+      .iotz-playback-actionbar {
+        border-bottom:
+          1px solid #e5e7eb;
+      }
+
+      .iotz-button {
+        position:relative;
+
+        z-index:30;
+
+        min-height:31px;
+
+        display:flex;
+        align-items:center;
+        justify-content:center;
+
+        gap:5px;
+
+        padding:0 9px;
+
+        border-radius:6px;
+
+        font-size:9px;
+        font-weight:800;
+
+        white-space:nowrap;
+
+        pointer-events:auto;
+      }
+
+      .iotz-green {
+        border:
+          1px solid #16a34a;
+
+        background:#16a34a;
+
+        color:#fff;
+      }
+
+      .iotz-blue {
+        border:
+          1px solid #2563eb;
+
+        background:#2563eb;
+
+        color:#fff;
+      }
+
+      .iotz-red {
+        border:
+          1px solid #fecaca;
+
+        background:#fef2f2;
+
+        color:#dc2626;
+      }
+
+      .iotz-download {
+        border:
+          1px solid #bbf7d0;
+
+        background:#f0fdf4;
+
+        color:#15803d;
+      }
+    .iotz-alarm {
+  display: none !important;
+}
+
+.iotz-alarm-status {
+  display: none !important;
+}
+
+.iotz-alarm.alarm-on {
+  border-color: #dc2626;
+  background: #dc2626;
+  color: #fff;
+}
+
+.iotz-alarm-status {
+  margin-left: auto;
+  font-size: 9px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+      .iotz-status {
+        margin-left:auto;
+
+        min-width:0;
+
+        overflow:hidden;
+
+        color:#64748b;
+
+        font-size:9px;
+        font-weight:700;
+
+        white-space:nowrap;
+
+        text-overflow:ellipsis;
+      }
+
+
+      /* PLAYBACK */
+
+      .iotz-playback-view {
+        display:none;
+
+        flex-direction:column;
+
+        overflow:hidden;
+
+        background:#f8fafc;
+      }
+
+      .iotz-playback-controls {
+        display:grid;
+
+        grid-template-columns:
+          1.25fr 1fr 1fr;
+
+        gap:6px;
+
+        padding:8px;
+
+        background:#fff;
+
+        border-bottom:
+          1px solid #e5e7eb;
+      }
+      .iotz-time-picker {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.iotz-time-picker select {
+  height: 32px;
+  padding: 0 8px;
+  border: 1px solid #d7dee8;
+  border-radius: 5px;
+  background: #fff;
+  color: #1f2937;
+  font: inherit;
+  cursor: pointer;
+}
+
+.iotz-time-picker select:first-child {
+  width: 70px;
+}
+
+.iotz-time-picker select:last-child {
+  width: 75px;
+}
+
+.iotz-time-picker span {
+  font-weight: 600;
+}
+
+      .iotz-field {
+        min-width:0;
+
+        display:flex;
+        flex-direction:column;
+
+        gap:3px;
+      }
+
+      .iotz-field span {
+        color:#64748b;
+
+        font-size:8px;
+        font-weight:800;
+
+        text-transform:uppercase;
+      }
+
+      .iotz-field input {
+        width:100%;
+        height:31px;
+
+        padding:0 7px;
+
+        border:
+          1px solid #dbe3ec;
+
+        border-radius:6px;
+
+        outline:none;
+
+        background:#fff;
+
+        color:#0f172a;
+
+        font-size:10px;
+      }
+
+      .iotz-playback-player {
+        position:relative;
+
+        z-index:1;
+
+        flex:1 1 auto;
+
+        min-height:0;
+
+        overflow:hidden;
+
+        background:#000;
+      }
+
+      .iotz-playback-video {
+        position:absolute;
+        inset:0;
+
+        width:100%;
+        height:100%;
+
+        object-fit:contain;
+
+        background:#000;
+      }
+
+      .iotz-playback-empty {
+        position:absolute;
+        inset:0;
+
+        display:flex;
+
+        align-items:center;
+        justify-content:center;
+
+        padding:20px;
+
+        color:#94a3b8;
+
+        font-size:10px;
+
+        text-align:center;
+
+        pointer-events:none;
+      }
+
+    </style>
+
+
+    <!-- HEADER -->
+
+    <div class="iotz-header">
+
+      <img
+        class="iotz-logo"
+        data-role="logo"
+        alt="IoTizen"
+      >
+
+      <div class="iotz-header-right">
+
+        <div
+          class="iotz-camera-name"
+          data-role="camera-name"
+        ></div>
+
+        <button
+          class="iotz-icon-button"
+          data-role="fullscreen"
+          type="button"
+          title="Fullscreen"
+        >
+
+          <svg
+            width="19"
+            height="19"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+          >
+
+            <path d="M8 3H5a2 2 0 0 0-2 2v3"/>
+            <path d="M16 3h3a2 2 0 0 1 2 2v3"/>
+            <path d="M8 21H5a2 2 0 0 1-2-2v-3"/>
+            <path d="M16 21h3a2 2 0 0 0 2-2v-3"/>
+
+          </svg>
+
+        </button>
+
+      </div>
+
+    </div>
+
+
+    <!-- MODE -->
+
+    <div class="iotz-modebar">
+
+      <button
+        class="iotz-mode-button live-active"
+        data-role="live-mode"
+        type="button"
+      >
+
+        LIVE
+
+      </button>
+
+
+      <button
+        class="iotz-mode-button"
+        data-role="playback-mode"
+        type="button"
+      >
+
+        PLAYBACK
+
+      </button>
+
+    </div>
+
+
+    <!-- CONTENT -->
+
+    <div class="iotz-content">
+
+
+      <!-- LIVE -->
+
+      <div
+        class="iotz-view iotz-live-view"
+        data-role="live-view"
+      >
+
+        <div class="iotz-live-player">
+
+          <video
+            class="iotz-live-video"
+            data-role="live-video"
+            autoplay
+            muted
+            playsinline
+            controls
+            preload="none"
+          ></video>
+
+
+          <div
+            class="iotz-placeholder"
+            data-role="live-placeholder"
+          >
+
+            <div
+              class="iotz-placeholder-icon"
+            >
+
+              ▶
+
+            </div>
+
+
+            <div
+              class="iotz-placeholder-title"
+              data-role="live-title"
+            ></div>
+
+
+            <div
+              class="iotz-placeholder-description"
+              data-role="live-description"
+            >
+
+              Stream tidak aktif · tekan PLAY untuk mulai
+
+            </div>
+
+
+            <button
+              class="iotz-button iotz-green"
+              data-role="big-live-play"
+              type="button"
+            >
+
+              ▶ PLAY LIVE
+
+            </button>
+
+          </div>
+
+
+          <div
+            class="iotz-loading"
+            data-role="live-loading"
+          >
+
+            Connecting...
+
+          </div>
+
+        </div>
+
+
+        <div class="iotz-actionbar">
+
+          <button
+            class="iotz-button iotz-green"
+            data-role="live-play"
+            type="button"
+          >
+
+            ▶ PLAY LIVE
+
+          </button>
+
+
+          <button
+            class="iotz-button iotz-red"
+            data-role="live-stop"
+            type="button"
+          >
+
+            ■ STOP LIVE
+
+          </button>
+<button
+  class="iotz-button iotz-alarm"
+  data-role="alarm-toggle"
+  type="button"
+>
+ <span data-role="alarm-icon">
+  <svg
+    width="24"
+    height="24"
+    xmlns="http://www.w3.org/2000/svg"
+    viewBox="0 0 24 24"
+    aria-hidden="true"
+  >
+    <g
+      fill="none"
+      stroke="currentColor"
+      stroke-linecap="round"
+      stroke-linejoin="round"
+      stroke-width="2"
+    >
+      <path
+        stroke-dasharray="4"
+        d="M12 3v2"
+      >
+        <animate
+          fill="freeze"
+          attributeName="stroke-dashoffset"
+          dur="0.2s"
+          values="4;0"
+        />
+      </path>
+
+      <path
+        stroke-dasharray="30"
+        stroke-dashoffset="30"
+        d="M12 5c-3.31 0-6 2.69-6 6v6c-1 0-2 1-2 2h8M12 5c3.31 0 6 2.69 6 6v6c1 0 2 1 2 2h-8"
+      >
+        <animate
+          fill="freeze"
+          attributeName="stroke-dashoffset"
+          begin="0.2s"
+          dur="0.4s"
+          to="0"
+        />
+      </path>
+
+      <path
+        stroke-dasharray="10"
+        stroke-dashoffset="10"
+        d="M10 20c0 1.1 0.9 2 2 2s2-0.9 2-2"
+      >
+        <animate
+          fill="freeze"
+          attributeName="stroke-dashoffset"
+          begin="0.7s"
+          dur="0.2s"
+          to="0"
+        />
+      </path>
+
+      <path
+        stroke-dasharray="6"
+        stroke-dashoffset="6"
+        d="M22 6v4"
+      >
+        <animate
+          fill="freeze"
+          attributeName="stroke-dashoffset"
+          begin="0.9s"
+          dur="0.2s"
+          to="0"
+        />
+      </path>
+
+      <path
+        stroke-dasharray="4"
+        stroke-dashoffset="4"
+        d="M22 14v0.01"
+      >
+        <animate
+          fill="freeze"
+          attributeName="stroke-dashoffset"
+          begin="1.1s"
+          dur="0.2s"
+          to="0"
+        />
+      </path>
+    </g>
+  </svg>
+</span>
+
+  <span data-role="alarm-label">ALARM OFF</span>
+</button>
+
+<div
+  class="iotz-alarm-status"
+  data-role="alarm-status"
+>
+  Menunggu status
+</div>
+
+          <div
+            class="iotz-status"
+            data-role="live-status"
+          >
+
+            Menunggu URL
+
+          </div>
+
+        </div>
+
+      </div>
+
+
+      <!-- PLAYBACK -->
+
+      <div
+        class="iotz-view iotz-playback-view"
+        data-role="playback-view"
+      >
+
+        <div class="iotz-playback-controls">
+
+          <label class="iotz-field">
+
+            <span>
+              Tanggal
+            </span>
+
+            <input
+              type="date"
+              data-role="playback-date"
+            >
+
+          </label>
+
+
+        <label class="iotz-field">
+
+  <span>Mulai</span>
+
+  <div class="iotz-time-picker">
+
+    <select data-role="start-hour">
+      <option value="">Jam</option>
+    </select>
+
+    <span>:</span>
+
+    <select data-role="start-minute">
+      <option value="">Menit</option>
+    </select>
+
+  </div>
+
+  <input
+    type="hidden"
+    data-role="playback-start"
+  >
+
+</label>
+
+
+<label class="iotz-field">
+
+  <span>Selesai</span>
+
+  <div class="iotz-time-picker">
+
+    <select data-role="end-hour">
+      <option value="">Jam</option>
+    </select>
+
+    <span>:</span>
+
+    <select data-role="end-minute">
+      <option value="">Menit</option>
+    </select>
+
+  </div>
+
+  <input
+    type="hidden"
+    data-role="playback-end"
+  >
+
+</label>
+        </div>
+
+
+        <div class="iotz-playback-actionbar">
+
+          <button
+            class="iotz-button iotz-blue"
+            data-role="play-record"
+            type="button"
+          >
+
+            ▶ PLAY RECORD
+
+          </button>
+
+
+          <button
+            class="iotz-button iotz-red"
+            data-role="stop-record"
+            type="button"
+          >
+
+            ■ STOP
+
+          </button>
+
+
+          <button
+            class="iotz-button iotz-download"
+            data-role="download"
+            type="button"
+          >
+
+            ↓ DOWNLOAD MP4
+
+          </button>
+
+
+          <div
+            class="iotz-status"
+            data-role="playback-status"
+          >
+
+            Ready
+
+          </div>
+
+        </div>
+
+
+        <div class="iotz-playback-player">
+
+          <video
+            class="iotz-playback-video"
+            data-role="playback-video"
+            controls
+            playsinline
+            preload="none"
+          ></video>
+
+
+          <div
+            class="iotz-playback-empty"
+            data-role="playback-empty"
+          >
+
+            Pilih tanggal dan jam lalu tekan PLAY RECORD
+
+          </div>
+
+        </div>
+
+      </div>
+
+    </div>
+
+  `;
+
+
+  /* ============================================================
+     ELEMENTS
+     ============================================================ */
+
+  const $ =
+    role =>
+      root.querySelector(
+        `[data-role="${role}"]`
+      );
+
+
+  const logo =
+    $("logo");
+
+  const cameraNameElement =
+    $("camera-name");
+
+  const fullscreenButton =
+    $("fullscreen");
+
+  const liveModeButton =
+    $("live-mode");
+
+  const playbackModeButton =
+    $("playback-mode");
+
+  const liveView =
+    $("live-view");
+
+  const playbackView =
+    $("playback-view");
+
+  const liveVideo =
+    $("live-video");
+
+  const livePlaceholder =
+    $("live-placeholder");
+
+  const liveTitle =
+    $("live-title");
+
+  const liveDescription =
+    $("live-description");
+
+  const liveLoading =
+    $("live-loading");
+
+  const liveStatus =
+    $("live-status");
+
+  const playbackStatus =
+    $("playback-status");
+
+  const playbackVideo =
+    $("playback-video");
+
+  const playbackEmpty =
+    $("playback-empty");
+
+  const playbackDate =
+    $("playback-date");
+
+  const playbackStart =
+    $("playback-start");
+
+  const playbackEnd =
+    $("playback-end");
+    const startHour =
+    $("start-hour");
+
+const startMinute =
+    $("start-minute");
+
+const endHour =
+    $("end-hour");
+
+const endMinute =
+    $("end-minute");
+
+  const playRecordButton =
+    $("play-record");
+
+  const downloadButton =
+    $("download");
+const alarmToggleButton =
+  $("alarm-toggle");
+
+const alarmIcon =
+  $("alarm-icon");
+
+const alarmLabel =
+  $("alarm-label");
+
+const alarmStatus =
+  $("alarm-status");
+
+  logo.src =
+    logoUrl;
+
+  cameraNameElement.textContent =
+    cameraName;
+
+  liveTitle.textContent =
+    cameraName;
+
+
+  /* ============================================================
+     DATE WIB
+     ============================================================ */
+
+  function getJakartaDate() {
+
+    const formatter =
+      new Intl.DateTimeFormat(
+        "en-CA",
+        {
+          timeZone:
+            "Asia/Jakarta",
+
+          year:
+            "numeric",
+
+          month:
+            "2-digit",
+
+          day:
+            "2-digit"
+        }
+      );
+
+
+    const values =
+      {};
+
+
+    for (
+      const part of
+      formatter.formatToParts(
+        new Date()
+      )
+    ) {
+
+      values[part.type] =
+        part.value;
+
+    }
+
+
+    return (
+      `${values.year}-` +
+      `${values.month}-` +
+      `${values.day}`
+    );
+
+  }
+
+
+  /* ============================================================
+     SHIFT TANGGAL
+     ============================================================ */
+
+  function shiftDateString(
+    dateString,
+    deltaDays
+  ) {
+
+    const [
+      year,
+      month,
+      day
+    ] =
+      dateString
+        .split("-")
+        .map(Number);
+
+
+    const date =
+      new Date(
+        Date.UTC(
+          year,
+          month - 1,
+          day
+        )
+      );
+
+
+    date.setUTCDate(
+      date.getUTCDate() +
+      deltaDays
+    );
+
+
+    return (
+      `${date.getUTCFullYear()}-` +
+      `${String(
+        date.getUTCMonth() + 1
+      ).padStart(
+        2,
+        "0"
+      )}-` +
+      `${String(
+        date.getUTCDate()
+      ).padStart(
+        2,
+        "0"
+      )}`
+    );
+
+  }
+
+
+  const todayPlaybackDate =
+    getJakartaDate();
+
+
+  const minimumPlaybackDate =
+    shiftDateString(
+      todayPlaybackDate,
+      -6
+    );
+
+
+  playbackDate.value =
+    todayPlaybackDate;
+
+  playbackDate.min =
+    minimumPlaybackDate;
+
+  playbackDate.max =
+    todayPlaybackDate;
+function fillTimeOptions() {
+
+  for (let i = 0; i < 24; i++) {
+
+    const value =
+      String(i).padStart(2, "0");
+
+    startHour.insertAdjacentHTML(
+      "beforeend",
+      `<option value="${value}">${value}</option>`
+    );
+
+    endHour.insertAdjacentHTML(
+      "beforeend",
+      `<option value="${value}">${value}</option>`
+    );
+
+  }
+
+
+  for (let i = 0; i < 60; i++) {
+
+    const value =
+      String(i).padStart(2, "0");
+
+    startMinute.insertAdjacentHTML(
+      "beforeend",
+      `<option value="${value}">${value}</option>`
+    );
+
+    endMinute.insertAdjacentHTML(
+      "beforeend",
+      `<option value="${value}">${value}</option>`
+    );
+
+  }
+
+}
+
+
+function updatePlaybackTime() {
+
+  const sh =
+    startHour.value;
+
+  const sm =
+    startMinute.value;
+
+  const eh =
+    endHour.value;
+
+  const em =
+    endMinute.value;
+
+
+  playbackStart.value =
+    sh && sm
+      ? `${sh}:${sm}`
+      : "";
+
+
+  playbackEnd.value =
+    eh && em
+      ? `${eh}:${em}`
+      : "";
+
+}
+
+
+startHour.addEventListener(
+  "change",
+  updatePlaybackTime
+);
+
+startMinute.addEventListener(
+  "change",
+  updatePlaybackTime
+);
+
+endHour.addEventListener(
+  "change",
+  updatePlaybackTime
+);
+
+endMinute.addEventListener(
+  "change",
+  updatePlaybackTime
+);
+
+
+fillTimeOptions();
+
+  /* ============================================================
+     TELEMETRY VALUE
+     ============================================================ */
+
+  function telemetryValue(
+    data,
+    key
+  ) {
+
+    const item =
+      data.find(
+        entry =>
+          entry.key === key
+      );
+
+
+    if (
+      !item ||
+      item.value === null ||
+      item.value === undefined
+    ) {
+
+      return "";
+
+    }
+
+
+    return String(
+      item.value
+    )
+      .trim()
+      .replace(
+        /\/+$/,
+        ""
+      );
+
+  }
+
+
+  /* ============================================================
+     UPDATE TELEMETRY
+     ============================================================ */
+
+  async function updateTelemetry() {
+
+    if (destroyed) {
+      return;
+    }
+
+
+    try {
+
+      const response =
+        await fetch(
+          `${telemetryEndpoint}&_=${Date.now()}`,
+          {
+            method:
+              "GET",
+
+            credentials:
+              "include",
+
+            cache:
+              "no-store"
+          }
+        );
+
+
+      if (!response.ok) {
+
+        throw new Error(
+          `HTTP ${response.status}`
+        );
+
+      }
+
+
+      const json =
+        await response.json();
+
+
+      if (
+        !json ||
+        json.success !== true ||
+        !Array.isArray(
+          json.data
+        )
+      ) {
+
+        throw new Error(
+          "Telemetry tidak valid"
+        );
+
+      }
+
+
+      const newCctvUrl =
+        telemetryValue(
+          json.data,
+          "cctv_public_url"
+        );
+
+
+      const newPlaybackUrl =
+        telemetryValue(
+          json.data,
+          "playback_public_url"
+        );
+      const newAlarmUrl =
+        telemetryValue(
+         json.data,
+        "alarm_public_url"
+       );
+
+      if (newCctvUrl) {
+
+        const changed =
+          (
+            currentCctvPublicUrl &&
+            currentCctvPublicUrl !==
+              newCctvUrl
+          );
+
+
+        currentCctvPublicUrl =
+          newCctvUrl;
+
+
+        if (
+          changed &&
+          liveRunning
+        ) {
+
+          stopLive();
+
+
+          liveStatus.textContent =
+            "URL berubah · tekan PLAY lagi";
+
+        }
+
+      }
+
+
+      if (newPlaybackUrl) {
+
+        currentPlaybackPublicUrl =
+          newPlaybackUrl;
+
+        console.log(
+          "[PLAYBACK PUBLIC URL]",
+          currentPlaybackPublicUrl
+        );
+
+      }
+      if (newAlarmUrl) {
+
+  currentAlarmPublicUrl =
+    newAlarmUrl;
+
+  console.log(
+    "[ALARM PUBLIC URL]",
+    currentAlarmPublicUrl
+  );
+
+}
+const newAlarmState =
+  telemetryValue(
+    json.data,
+    "state_alarm"
+  );
+
+if (newAlarmState) {
+  console.log(
+    "[ALARM STATE]",
+    newAlarmState
+  );
+
+  const alarmOn =
+    newAlarmState.toUpperCase() === "ON";
+
+  const alarmButton =
+    $("alarm-toggle");
+
+  const alarmIcon =
+    $("alarm-icon");
+
+  const alarmLabel =
+    $("alarm-label");
+
+  const alarmStatus =
+    $("alarm-status");
+
+  alarmButton.classList.toggle(
+    "alarm-on",
+    alarmOn
+  );
+
+// SVG alarm tetap
+
+  alarmLabel.textContent =
+    alarmOn ? "ALARM ON" : "ALARM OFF";
+
+  alarmStatus.textContent =
+    alarmOn
+      ? "Alarm aktif"
+      : "Alarm mati";
+}
+      if (
+        currentMode === "live" &&
+        !liveRunning
+      ) {
+
+        liveStatus.textContent =
+          currentCctvPublicUrl
+            ? "Ready"
+            : "Menunggu URL";
+
+      }
+
+    }
+
+    catch (error) {
+
+      console.error(
+        "[TELEMETRY]",
+        error
+      );
+
+
+      if (
+        currentMode === "live" &&
+        !liveRunning
+      ) {
+
+        liveStatus.textContent =
+          "Telemetry error";
+
+      }
+
+    }
+
+  }
+
+
+  /* ============================================================
+     HLS.JS
+     ============================================================ */
+
+  async function ensureHls() {
+
+    if (window.Hls) {
+      return window.Hls;
+    }
+
+
+    const existing =
+      document.querySelector(
+        'script[data-iotizen-hls="true"]'
+      );
+
+
+    if (existing) {
+
+      return new Promise(
+        (
+          resolve,
+          reject
+        ) => {
+
+          if (window.Hls) {
+
+            resolve(
+              window.Hls
+            );
+
+            return;
+
+          }
+
+
+          existing.addEventListener(
+            "load",
+            () =>
+              resolve(
+                window.Hls
+              ),
+            {
+              once:true
+            }
+          );
+
+
+          existing.addEventListener(
+            "error",
+            () =>
+              reject(
+                new Error(
+                  "HLS.js gagal dimuat"
+                )
+              ),
+            {
+              once:true
+            }
+          );
+
+        }
+      );
+
+    }
+
+
+    return new Promise(
+      (
+        resolve,
+        reject
+      ) => {
+
+        const script =
+          document.createElement(
+            "script"
+          );
+
+
+        script.src =
+          HLS_JS_URL;
+
+
+        script.dataset.iotizenHls =
+          "true";
+
+
+        script.onload =
+          () => {
+
+            if (window.Hls) {
+
+              resolve(
+                window.Hls
+              );
+
+            }
+
+            else {
+
+              reject(
+                new Error(
+                  "HLS.js tidak tersedia"
+                )
+              );
+
+            }
+
+          };
+
+
+        script.onerror =
+          () =>
+            reject(
+              new Error(
+                "HLS.js gagal dimuat"
+              )
+            );
+
+
+        document.head.appendChild(
+          script
+        );
+
+      }
+    );
+
+  }
+
+
+  /* ============================================================
+     START LIVE
+     ============================================================ */
+
+  async function startLive() {
+
+    if (
+      destroyed ||
+      currentMode !== "live" ||
+      liveRunning
+    ) {
+
+      return;
+
+    }
+
+
+    if (!currentCctvPublicUrl) {
+
+      liveStatus.textContent =
+        "URL CCTV belum tersedia";
+
+      return;
+
+    }
+
+
+    const streamUrl =
+      `${currentCctvPublicUrl}` +
+      `/cam${cameraNumber}/index.m3u8`;
+
+
+    liveRunning =
+      true;
+
+
+    livePlaceholder.style.display =
+      "none";
+
+    liveVideo.style.display =
+      "block";
+
+    liveLoading.style.display =
+      "flex";
+
+    liveStatus.textContent =
+      "Connecting HLS...";
+
+
+    if (liveHls) {
+
+      try {
+        liveHls.destroy();
+      }
+
+      catch (_) {
+      }
+
+      liveHls =
+        null;
+
+    }
+
+
+    liveVideo.pause();
+
+    liveVideo.removeAttribute(
+      "src"
+    );
+
+    liveVideo.load();
+
+    liveVideo.crossOrigin =
+      "use-credentials";
+
+
+    try {
+
+      const Hls =
+        await ensureHls();
+
+
+      if (
+        destroyed ||
+        !liveRunning ||
+        currentMode !== "live"
+      ) {
+
+        return;
+
+      }
+
+
+      if (
+        liveVideo.canPlayType(
+          "application/vnd.apple.mpegurl"
+        )
+      ) {
+
+        liveVideo.src =
+          streamUrl;
+
+        liveVideo.load();
+
+        await liveVideo.play();
+
+        return;
+
+      }
+
+
+      if (
+        !Hls ||
+        !Hls.isSupported()
+      ) {
+
+        throw new Error(
+          "Browser tidak mendukung HLS"
+        );
+
+      }
+
+
+      liveHls =
+        new Hls({
+
+          enableWorker:
+            false,
+
+          lowLatencyMode:
+            true,
+
+          backBufferLength:
+            30,
+
+          maxBufferLength:
+            10,
+
+          maxMaxBufferLength:
+            30,
+
+          manifestLoadingMaxRetry:
+            10,
+
+          manifestLoadingRetryDelay:
+            500,
+
+          manifestLoadingMaxRetryTimeout:
+            10000,
+
+          levelLoadingMaxRetry:
+            10,
+
+          levelLoadingRetryDelay:
+            500,
+
+          levelLoadingMaxRetryTimeout:
+            10000,
+
+          fragLoadingMaxRetry:
+            10,
+
+          fragLoadingRetryDelay:
+            500,
+
+          fragLoadingMaxRetryTimeout:
+            10000,
+
+          xhrSetup:
+            xhr => {
+
+              xhr.withCredentials =
+                true;
+
+            }
+
+        });
+
+
+      liveHls.loadSource(
+        streamUrl
+      );
+
+      liveHls.attachMedia(
+        liveVideo
+      );
+
+
+      liveHls.on(
+        Hls.Events.MANIFEST_PARSED,
+        async () => {
+
+          try {
+
+            await liveVideo.play();
+
+          }
+
+          catch (_) {
+
+            liveStatus.textContent =
+              "HLS siap · tekan PLAY video";
+
+          }
+
+        }
+      );
+
+
+      liveHls.on(
+        Hls.Events.ERROR,
+        (
+          event,
+          data
+        ) => {
+
+          console.error(
+            "[LIVE HLS ERROR]",
+            data
+          );
+
+
+          if (
+            !data ||
+            !data.fatal
+          ) {
+
+            return;
+
+          }
+
+
+          if (
+            data.type ===
+            Hls.ErrorTypes.NETWORK_ERROR
+          ) {
+
+            liveStatus.textContent =
+              "Network retry...";
+
+
+            try {
+              liveHls.startLoad();
+            }
+
+            catch (_) {
+            }
+
+
+            return;
+
+          }
+
+
+          if (
+            data.type ===
+            Hls.ErrorTypes.MEDIA_ERROR
+          ) {
+
+            liveStatus.textContent =
+              "Media recovery...";
+
+
+            try {
+              liveHls.recoverMediaError();
+            }
+
+            catch (_) {
+            }
+
+
+            return;
+
+          }
+
+
+          liveStatus.textContent =
+            "LIVE HLS gagal";
+
+        }
+      );
+
+    }
+
+    catch (error) {
+
+      console.error(
+        "[START LIVE]",
+        error
+      );
+
+
+      liveRunning =
+        false;
+
+      liveVideo.pause();
+
+      liveVideo.removeAttribute(
+        "src"
+      );
+
+      liveVideo.load();
+
+      liveVideo.style.display =
+        "none";
+
+      liveLoading.style.display =
+        "none";
+
+      livePlaceholder.style.display =
+        "flex";
+
+      liveDescription.textContent =
+        error.message ||
+        "HLS gagal dimuat";
+
+      liveStatus.textContent =
+        "LIVE gagal";
+
+    }
+
+  }
+
+
+  /* ============================================================
+     LIVE EVENTS
+     ============================================================ */
+
+  liveVideo.addEventListener(
+    "playing",
+    () => {
+
+      if (
+        !liveRunning ||
+        destroyed
+      ) {
+        return;
+      }
+
+
+      liveLoading.style.display =
+        "none";
+
+      livePlaceholder.style.display =
+        "none";
+
+      liveVideo.style.display =
+        "block";
+
+      liveDescription.textContent =
+        "Stream aktif";
+
+      liveStatus.textContent =
+        "LIVE";
+
+    }
+  );
+
+
+  liveVideo.addEventListener(
+    "waiting",
+    () => {
+
+      if (
+        liveRunning &&
+        !destroyed
+      ) {
+
+        liveStatus.textContent =
+          "Buffering...";
+
+      }
+
+    }
+  );
+
+
+  liveVideo.addEventListener(
+    "canplay",
+    () => {
+
+      if (
+        liveRunning &&
+        !destroyed
+      ) {
+
+        liveLoading.style.display =
+          "none";
+
+      }
+
+    }
+  );
+
+
+  liveVideo.addEventListener(
+    "error",
+    () => {
+
+      if (
+        !liveRunning ||
+        destroyed
+      ) {
+        return;
+      }
+
+
+      console.error(
+        "[LIVE VIDEO ERROR]",
+        liveVideo.error
+      );
+
+
+      liveLoading.style.display =
+        "none";
+
+      liveStatus.textContent =
+        "Video error";
+
+    }
+  );
+
+
+  /* ============================================================
+     STOP LIVE
+     ============================================================ */
+
+  function stopLive() {
+
+    liveRunning =
+      false;
+
+
+    if (liveHls) {
+
+      try {
+        liveHls.destroy();
+      }
+
+      catch (_) {
+      }
+
+      liveHls =
+        null;
+
+    }
+
+
+    liveVideo.pause();
+
+    liveVideo.removeAttribute(
+      "src"
+    );
+
+    liveVideo.load();
+
+    liveVideo.style.display =
+      "none";
+
+    liveLoading.style.display =
+      "none";
+
+    livePlaceholder.style.display =
+      "flex";
+
+    liveDescription.textContent =
+      "Stream tidak aktif · tekan PLAY untuk mulai";
+
+    liveStatus.textContent =
+      currentCctvPublicUrl
+        ? "Stopped"
+        : "Menunggu URL";
+
+  }
+
+
+  /* ============================================================
+     VALIDASI PLAYBACK
+     ============================================================ */
+
+  function getPlaybackQuery() {
+
+    const date =
+      playbackDate.value;
+
+    const start =
+      playbackStart.value;
+
+    const end =
+      playbackEnd.value;
+
+
+    if (!date) {
+
+      throw new Error(
+        "Pilih tanggal"
+      );
+
+    }
+
+
+    if (
+      !start ||
+      !end
+    ) {
+
+      throw new Error(
+        "Pilih jam mulai dan selesai"
+      );
+
+    }
+
+
+    if (
+      date <
+        minimumPlaybackDate ||
+      date >
+        todayPlaybackDate
+    ) {
+
+      throw new Error(
+        "Tanggal hanya tersedia untuk 7 hari terakhir"
+      );
+
+    }
+
+
+    if (
+      end <= start
+    ) {
+
+      throw new Error(
+        "Jam selesai harus setelah jam mulai"
+      );
+
+    }
+
+
+    const durationSeconds =
+      parsePlaybackDuration();
+
+
+    if (
+      !Number.isFinite(
+        durationSeconds
+      ) ||
+      durationSeconds <= 0
+    ) {
+
+      throw new Error(
+        "Durasi playback tidak valid"
+      );
+
+    }
+
+
+    if (
+      durationSeconds >
+      3600
+    ) {
+
+      throw new Error(
+        "Rentang maksimum 1 jam"
+      );
+
+    }
+
+
+    return (
+      `camera=${encodeURIComponent(cameraNumber)}` +
+      `&date=${encodeURIComponent(date)}` +
+      `&start=${encodeURIComponent(start)}` +
+      `&end=${encodeURIComponent(end)}`
+    );
+
+  }
+
+
+  /* ============================================================
+     PARSE HLS PLAYLIST
+     ============================================================ */
+
+  function parseHlsPlaylist(text) {
+
+    const extinfMatches =
+      text.match(
+        /^#EXTINF:([0-9.]+)/gm
+      ) || [];
+
+
+    let totalDuration = 0;
+
+
+    for (
+      const line of extinfMatches
+    ) {
+
+      const match =
+        line.match(
+          /^#EXTINF:([0-9.]+)/
+        );
+
+
+      if (match) {
+
+        totalDuration +=
+          Number(match[1]) || 0;
+
+      }
+
+    }
+
+
+    return {
+      segmentCount:
+        extinfMatches.length,
+
+      totalDuration,
+
+      ended:
+        text.includes(
+          "#EXT-X-ENDLIST"
+        )
+    };
+
+  }
+
+
+  /* ============================================================
+     WAIT FULL HLS VOD PLAYLIST
+     ============================================================ */
+
+  async function waitPlaylistReady(
+    playlistUrl,
+    expectedDuration
+  ) {
+
+    const expected =
+      Math.max(
+        1,
+        Number(
+          expectedDuration
+        ) || 0
+      );
+
+
+    playbackStatus.textContent =
+      `Menunggu recording ${formatDuration(expected)}...`;
+
+
+    for (
+      let attempt = 1;
+      attempt <= 180;
+      attempt++
+    ) {
+
+      try {
+
+        const separator =
+          playlistUrl.includes("?")
+            ? "&"
+            : "?";
+
+
+        const response =
+          await fetch(
+            `${playlistUrl}${separator}_=${Date.now()}`,
+            {
+              method:
+                "GET",
+
+              /*
+               * PLAYLIST PUBLIC HLS:
+               * Jangan kirim browser credentials/cookie.
+               * Authorization token hanya diperlukan
+               * untuk endpoint API seperti /start dan /stop.
+               */
+              credentials:
+                "omit",
+
+              cache:
+                "no-store"
+            }
+          );
+
+
+        if (response.ok) {
+
+          const text =
+            await response.text();
+
+
+          const info =
+            parseHlsPlaylist(
+              text
+            );
+
+
+          const enoughDuration =
+            info.totalDuration >=
+            (
+              expected - 0.5
+            );
+
+
+          const finished =
+            info.ended;
+
+
+          if (
+            enoughDuration &&
+            finished
+          ) {
+
+            console.log(
+              "[PLAYBACK HLS READY]",
+              {
+                expected,
+                actual:
+                  info.totalDuration,
+                segments:
+                  info.segmentCount,
+                ended:
+                  info.ended
+              }
+            );
+
+
+            playbackStatus.textContent =
+              `Playlist siap · ${formatDuration(info.totalDuration)}`;
+
+
+            return {
+              duration:
+                info.totalDuration,
+
+              segmentCount:
+                info.segmentCount,
+
+              ended:
+                info.ended
+            };
+
+          }
+
+
+          playbackStatus.textContent =
+            `Menyiapkan HLS ${formatDuration(info.totalDuration)} / ${formatDuration(expected)}`;
+
+        }
+
+      }
+
+      catch (error) {
+
+        console.warn(
+          "[WAIT HLS]",
+          error
+        );
+
+      }
+
+
+      await sleep(
+        500
+      );
+
+    }
+
+
+    throw new Error(
+      "Playlist HLS tidak selesai sesuai durasi request"
+    );
+
+  }
+
+
+  /* ============================================================
+     RESET PLAYBACK PLAYER
+     ============================================================ */
+
+  function resetPlaybackPlayer() {
+
+    if (playbackHls) {
+
+      try {
+        playbackHls.destroy();
+      }
+
+      catch (_) {
+      }
+
+      playbackHls =
+        null;
+
+    }
+
+
+    playbackVideo.pause();
+
+    playbackVideo.removeAttribute(
+      "src"
+    );
+
+    playbackVideo.load();
+
+    playbackExpectedDuration =
+      0;
+
+    playbackEmpty.style.display =
+      "flex";
+
+  }
+
+
+  /* ============================================================
+     STOP SERVER PLAYBACK
+     ============================================================ */
+
+  async function stopPlaybackServer() {
+
+    const stopUrl =
+      playbackStopUrl;
+
+
+    playbackStopUrl =
+      "";
+
+
+    if (!stopUrl) {
+      return;
+    }
+
+
+    try {
+
+      await fetch(
+        stopUrl,
+        {
+          method:
+            "GET",
+
+          headers:
+            authHeaders(),
+
+          cache:
+            "no-store"
+        }
+      );
+
+    }
+
+    catch (error) {
+
+      console.warn(
+        "[STOP PLAYBACK SERVER]",
+        error
+      );
+
+    }
+
+  }
+
+
+  /* ============================================================
+     STOP PLAYBACK
+     ============================================================ */
+
+  async function stopPlayback(
+    notifyServer = true
+  ) {
+
+    resetPlaybackPlayer();
+
+
+    if (notifyServer) {
+
+      await stopPlaybackServer();
+
+    }
+
+    else {
+
+      playbackStopUrl =
+        "";
+
+    }
+
+
+    playbackStatus.textContent =
+      "Stopped";
+
+  }
+
+
+  /* ============================================================
+     START HLS SESSION
+     ============================================================ */
+
+  async function startHlsSession(
+    query
+  ) {
+
+    /*
+     * PENTING:
+     * URL DIAMBIL TI TELEMETRY.
+     *
+     * Henteu aya URL Quick Tunnel
+     * anu di-hardcode dina widget.
+     */
+
+    if (!currentPlaybackPublicUrl) {
+
+      throw new Error(
+        "playback_public_url belum tersedia dari telemetry"
+      );
+
+    }
+
+
+    const startUrl =
+      `${currentPlaybackPublicUrl}` +
+      `/api/playback/hls/start?` +
+      `${query}` +
+      `&_=${Date.now()}`;
+
+
+    console.log(
+      "[PLAYBACK START URL]",
+      startUrl
+    );
+
+for (
+  let attempt = 1;
+  attempt <= 12;
+  attempt++
+) {
+      const response =
+        await fetch(
+          startUrl,
+          {
+            method:
+              "GET",
+
+            headers:
+              authHeaders(),
+
+            cache:
+              "no-store"
+          }
+        );
+
+
+      const data =
+        await response
+          .json()
+          .catch(
+            () => ({})
+          );
+
+
+      if (
+        response.ok &&
+        data.success &&
+        data.playlist_url
+      ) {
+
+        
+  console.log(
+    "[PLAYBACK SESSION DEBUG]",
+    {
+      session: data.session,
+      playlist_url: data.playlist_url,
+      stop_url: data.stop_url
+    }
+  );
+
+
+        /*
+         * PERUBAHAN PENTING:
+         *
+         * Backend mengembalikan:
+         *
+         * /api/playback/hls/files/.../index.m3u8
+         *
+         * Browser perlu URL penuh.
+         *
+         * Jadi konversi dilakukan SATU KALI
+         * di sini.
+         */
+
+        data.playlist_url =
+          new URL(
+            data.playlist_url,
+            `${currentPlaybackPublicUrl}/`
+          ).href;
+
+
+        if (data.stop_url) {
+
+          data.stop_url =
+            new URL(
+              data.stop_url,
+              `${currentPlaybackPublicUrl}/`
+            ).href;
+
+        }
+
+
+        console.log(
+          "[PLAYBACK SESSION READY]",
+          {
+            playlistUrl:
+              data.playlist_url,
+
+            stopUrl:
+              data.stop_url || ""
+          }
+        );
+
+
+        return data;
+
+      }
+
+
+    if (
+  response.status === 409 &&
+  attempt < 12
+) {
+
+  console.warn(
+    "[PLAYBACK START RETRY]",
+    {
+      attempt,
+      maxAttempts: 12,
+      error: data.error || "Playback masih aktif"
+    }
+  );
+
+  playbackStatus.textContent =
+    `Menunggu playback sebelumnya selesai ${attempt}/12...`;
+
+  await sleep(
+    500
+  );
+
+  continue;
+
+}
+
+
+      throw new Error(
+        data.error ||
+        `HTTP ${response.status}`
+      );
+
+    }
+
+
+    throw new Error(
+      "NVR masih sibuk"
+    );
+
+  }
+
+
+  /* ============================================================
+     ATTACH PLAYBACK HLS
+     ============================================================ */
+
+  async function attachPlaybackHls(playlistUrl, expectedDuration) {
+  const absolutePlaylistUrl = new URL(
+    playlistUrl,
+    `${currentPlaybackPublicUrl}/`
+  ).href;
+
+  // JANGAN menunggu playlist selesai.
+  // HLS akan diputar secara progressive saat segment pertama tersedia.
+  playbackStatus.textContent = "Memuat recording...";
+
+  playbackVideo.removeAttribute("crossorigin");
+
+  // =========================================================
+  // NATIVE HLS
+  // =========================================================
+ if (
+  /Safari/.test(navigator.userAgent) &&
+  !/Chrome|Chromium|CriOS/.test(navigator.userAgent) &&
+  playbackVideo.canPlayType("application/vnd.apple.mpegurl")
+) {
+    playbackVideo.src = absolutePlaylistUrl;
+    console.log(
+  "[NATIVE HLS URL]",
+  playbackVideo.src
+);
+    playbackVideo.load();
+
+    try {
+      await playbackVideo.play();
+
+      playbackStatus.textContent = "Recording diputar";
+    } catch (error) {
+      console.warn(
+        "[Playback] Native HLS autoplay belum berjalan:",
+        error
+      );
+
+      playbackStatus.textContent =
+        "Recording siap — tekan Play";
+    }
+
+    return;
+  }
+
+  // =========================================================
+  // HLS.JS
+  // =========================================================
+  const Hls = await ensureHls();
+
+  if (!Hls) {
+    throw new Error("HLS.js tidak tersedia");
+  }
+
+  if (playbackHls) {
+    try {
+      playbackHls.destroy();
+    } catch (_) {}
+
+    playbackHls = null;
+  }
+
+  playbackHls = new Hls({
+    enableWorker: true,
+
+    // Buffer kecil supaya playback bisa mulai cepat
+    maxBufferLength: 10,
+    maxMaxBufferLength: 30,
+    maxBufferSize: 30 * 1000 * 1000,
+
+    // Retry network
+    manifestLoadingMaxRetry: 3,
+    manifestLoadingRetryDelay: 1000,
+    levelLoadingMaxRetry: 3,
+    levelLoadingRetryDelay: 1000,
+    fragLoadingMaxRetry: 3,
+    fragLoadingRetryDelay: 1000,
+
+    // Jangan paksa live behavior.
+    // Playlist recording tetap boleh bertambah sampai ENDLIST.
+    liveSyncDurationCount: 1
+  });
+
+  playbackHls.on(Hls.Events.MANIFEST_PARSED, async () => {
+    console.log("[Playback] HLS manifest parsed");
+
+    playbackStatus.textContent =
+      "Recording siap diputar";
+
+    try {
+      await playbackVideo.play();
+
+      playbackStatus.textContent =
+        "Recording diputar";
+    } catch (error) {
+      console.warn(
+        "[Playback] HLS autoplay belum berjalan:",
+        error
+      );
+
+      playbackStatus.textContent =
+        "Recording siap — tekan Play";
+    }
+  });
+
+  playbackHls.on(Hls.Events.LEVEL_LOADED, (_event, data) => {
+    const details = data?.details;
+
+    if (!details) return;
+
+    console.log(
+      "[Playback] LEVEL_LOADED:",
+      {
+        totalduration: details.totalduration,
+        live: details.live,
+        fragments: details.fragments?.length
+      }
+    );
+
+    // HANYA update status.
+    // Tidak menunggu ENDLIST.
+    if (details.fragments?.length) {
+      playbackStatus.textContent =
+        "Recording diputar";
+    }
+  });
+
+  playbackHls.on(Hls.Events.ERROR, (_event, data) => {
+    console.log(
+  "[DIAG HLS ERROR]",
+  {
+    type: data?.type,
+    details: data?.details,
+    fatal: data?.fatal,
+    error: data?.error,
+    reason: data?.reason,
+    url: data?.url
+  }
+);
+    console.warn(
+      "[Playback] HLS error:",
+      data
+    );
+
+    if (!data?.fatal) {
+      return;
+    }
+
+    switch (data.type) {
+      case Hls.ErrorTypes.NETWORK_ERROR:
+        console.warn(
+          "[Playback] Fatal network error, mencoba recovery..."
+        );
+
+        try {
+          playbackHls.startLoad();
+        } catch (error) {
+          console.error(
+            "[Playback] startLoad gagal:",
+            error
+          );
+        }
+
+        break;
+
+      case Hls.ErrorTypes.MEDIA_ERROR:
+        console.warn(
+          "[Playback] Fatal media error, mencoba recovery..."
+        );
+
+        try {
+          playbackHls.recoverMediaError();
+        } catch (error) {
+          console.error(
+            "[Playback] recoverMediaError gagal:",
+            error
+          );
+        }
+
+        break;
+
+      default:
+        console.error(
+          "[Playback] Fatal HLS error:",
+          data
+        );
+
+        try {
+          playbackHls.destroy();
+        } catch (_) {}
+
+        playbackHls = null;
+
+        playbackStatus.textContent =
+          "Gagal memutar recording";
+        break;
+    }
+  });
+
+  // =========================================================
+  // LANGSUNG LOAD PLAYLIST
+  // =========================================================
+  console.log(
+    "[Playback] Loading HLS playlist:",
+    absolutePlaylistUrl
+  );
+
+  playbackHls.loadSource(absolutePlaylistUrl);
+  playbackHls.attachMedia(playbackVideo);
+}
+
+  /* ============================================================
+     PLAYBACK VIDEO METADATA
+     ============================================================ */
+
+  playbackVideo.addEventListener(
+    "loadedmetadata",
+    () => {
+
+      if (destroyed) {
+        return;
+      }
+
+
+      const actualDuration =
+        playbackVideo.duration;
+
+
+      console.log(
+        "[PLAYBACK VIDEO DURATION]",
+        {
+          requested:
+            playbackExpectedDuration,
+
+          browser:
+            actualDuration,
+
+          difference:
+            Number.isFinite(
+              actualDuration
+            )
+              ? (
+                  actualDuration -
+                  playbackExpectedDuration
+                )
+              : null
+        }
+      );
+
+
+      if (
+        Number.isFinite(
+          actualDuration
+        )
+      ) {
+
+        if (
+          actualDuration <
+          playbackExpectedDuration - 2
+        ) {
+
+          playbackStatus.textContent =
+            `Peringatan duration ${formatDuration(actualDuration)} / ${formatDuration(playbackExpectedDuration)}`;
+
+        }
+
+        else {
+
+          playbackStatus.textContent =
+            `Video siap · ${formatDuration(actualDuration)}`;
+
+        }
+
+      }
+
+    }
+  );
+
+
+  playbackVideo.addEventListener(
+    "durationchange",
+    () => {
+
+      if (destroyed) {
+        return;
+      }
+
+
+      const duration =
+        playbackVideo.duration;
+
+
+      if (
+        Number.isFinite(
+          duration
+        ) &&
+        duration > 0
+      ) {
+
+        console.log(
+          "[PLAYBACK DURATION CHANGE]",
+          duration
+        );
+
+      }
+
+    }
+  );
+
+
+  playbackVideo.addEventListener(
+    "canplay",
+    () => {
+
+      if (destroyed) {
+        return;
+      }
+
+
+      if (
+        playbackVideo.duration &&
+        Number.isFinite(
+          playbackVideo.duration
+        )
+      ) {
+
+        playbackStatus.textContent =
+          `Siap diputar · ${formatDuration(playbackVideo.duration)}`;
+
+      }
+
+    }
+  );
+
+
+  /* ============================================================
+     PLAY RECORD
+     ============================================================ */
+
+  async function playRecording() {
+
+    if (playbackStarting) {
+      return;
+    }
+
+
+    playbackStarting =
+      true;
+
+    playRecordButton.disabled =
+      true;
+
+
+    try {
+
+      if (!currentPlaybackPublicUrl) {
+
+        throw new Error(
+          "playback_public_url belum tersedia"
+        );
+
+      }
+updatePlaybackTime();
+
+const query =
+  getPlaybackQuery();
+
+stopLive();
+
+await stopPlayback(
+  true
+);
+
+playbackExpectedDuration =
+  parsePlaybackDuration();
+      console.log(
+  "[DIAGNOSIS DURASI]",
+  {
+    playbackExpectedDuration,
+    playbackStart: playbackStart.value,
+    playbackEnd: playbackEnd.value
+  }
+);
+
+      stopLive();
+
+
+      await stopPlayback(
+        true
+      );
+
+
+      playbackEmpty.style.display =
+        "none";
+
+
+      playbackStatus.textContent =
+        `Menyiapkan recording ${formatDuration(playbackExpectedDuration)}...`;
+
+
+      const data =
+        await startHlsSession(
+          query
+        );
+
+
+      /*
+       * startHlsSession() ayeuna geus
+       * ngarobah stop_url jadi absolute URL.
+       */
+
+      playbackStopUrl =
+        data.stop_url || "";
+
+
+      /*
+       * startHlsSession() ogé geus ngarobah
+       * playlist_url jadi absolute URL.
+       */
+
+      const playlistUrl =
+        data.playlist_url;
+
+
+      if (!playlistUrl) {
+
+        throw new Error(
+          "Server tidak mengembalikan playlist playback"
+        );
+
+      }
+
+
+      console.log("[PLAYBACK TIME DEBUG]", {
+  startHour: startHour.value,
+  startMinute: startMinute.value,
+  endHour: endHour.value,
+  endMinute: endMinute.value,
+  playbackStart: playbackStart.value,
+  playbackEnd: playbackEnd.value
+});
+
+
+
+      await attachPlaybackHls(
+        playlistUrl,
+        playbackExpectedDuration
+      );
+
+    }
+
+    catch (error) {
+
+      console.error(
+        "[PLAYBACK]",
+        error
+      );
+
+
+      if (playbackStopUrl) {
+
+        await stopPlaybackServer();
+
+      }
+
+
+      resetPlaybackPlayer();
+
+
+      playbackStatus.textContent =
+        error.message;
+
+
+      playbackEmpty.style.display =
+        "flex";
+
+    }
+
+    finally {
+
+      playbackStarting =
+        false;
+
+      playRecordButton.disabled =
+        false;
+
+    }
+
+  }
+
+
+  /* ============================================================
+     RESPONSE ERROR
+     ============================================================ */
+
+  async function responseError(
+    response
+  ) {
+
+    try {
+
+      const data =
+        await response.json();
+
+
+      return (
+        data.error ||
+        data.details ||
+        `HTTP ${response.status}`
+      );
+
+    }
+
+    catch (_) {
+
+      return (
+        `HTTP ${response.status}`
+      );
+
+    }
+
+  }
+
+
+  /* ============================================================
+     DOWNLOAD MP4
+     ============================================================ */
+
+  async function downloadRecording() {
+
+    downloadButton.disabled =
+      true;
+
+
+    try {
+
+      if (!currentPlaybackPublicUrl) {
+
+        throw new Error(
+          "playback_public_url belum tersedia"
+        );
+
+      }
+
+
+      const query =
+        getPlaybackQuery();
+
+
+      const requestedDuration =
+        parsePlaybackDuration();
+
+
+      playbackStatus.textContent =
+        "Melepas playback...";
+
+
+      await stopPlayback(
+        true
+      );
+
+
+      await sleep(
+        1000
+      );
+
+
+      const downloadUrl =
+        `${currentPlaybackPublicUrl}` +
+        `/api/playback/download?` +
+        `${query}` +
+        `&_=${Date.now()}`;
+
+
+      let response =
+        null;
+
+
+      for (
+        let attempt = 1;
+        attempt <= 10;
+        attempt++
+      ) {
+
+        playbackStatus.textContent =
+          attempt === 1
+            ? `Menyiapkan MP4 ${formatDuration(requestedDuration)}...`
+            : `Menunggu NVR ${attempt}/10...`;
+
+
+        response =
+          await fetch(
+            downloadUrl,
+            {
+              method:
+                "GET",
+
+              headers:
+                authHeaders(),
+
+              cache:
+                "no-store"
+            }
+          );
+
+
+        if (response.ok) {
+          break;
+        }
+
+
+        if (
+          response.status === 409 &&
+          attempt < 10
+        ) {
+
+          await sleep(
+            800
+          );
+
+
+          continue;
+
+        }
+
+
+        throw new Error(
+          await responseError(
+            response
+          )
+        );
+
+      }
+
+
+      if (
+        !response ||
+        !response.ok
+      ) {
+
+        throw new Error(
+          "Download gagal"
+        );
+
+      }
+
+
+      playbackStatus.textContent =
+        "Mengunduh MP4...";
+
+
+      const blob =
+        await response.blob();
+
+
+      if (
+        !blob ||
+        blob.size <= 0
+      ) {
+
+        throw new Error(
+          "File MP4 kosong"
+        );
+
+      }
+
+
+      const objectUrl =
+        URL.createObjectURL(
+          blob
+        );
+
+
+      const filename =
+        (
+          `CAM${cameraNumber}_` +
+          `${playbackDate.value}_` +
+          `${playbackStart.value.replace(":", "")}-` +
+          `${playbackEnd.value.replace(":", "")}.mp4`
+        );
+
+
+      const anchor =
+        document.createElement(
+          "a"
+        );
+
+
+      anchor.href =
+        objectUrl;
+
+      anchor.download =
+        filename;
+
+      anchor.style.display =
+        "none";
+
+
+      document.body.appendChild(
+        anchor
+      );
+
+
+      anchor.click();
+
+      anchor.remove();
+
+
+      setTimeout(
+        () => {
+
+          URL.revokeObjectURL(
+            objectUrl
+          );
+
+        },
+        30000
+      );
+
+
+      playbackStatus.textContent =
+        `Download siap · ${(blob.size / 1024 / 1024).toFixed(1)} MB`;
+
+    }
+
+    catch (error) {
+
+      console.error(
+        "[DOWNLOAD]",
+        error
+      );
+
+
+      playbackStatus.textContent =
+        error.message;
+
+    }
+
+    finally {
+
+      downloadButton.disabled =
+        false;
+
+    }
+
+  }
+
+
+  /* ============================================================
+     SHOW LIVE
+     ============================================================ */
+
+  async function showLive() {
+
+    await stopPlayback(
+      true
+    );
+
+
+    currentMode =
+      "live";
+
+
+    playbackView.style.display =
+      "none";
+
+    liveView.style.display =
+      "flex";
+
+
+    liveModeButton.classList.add(
+      "live-active"
+    );
+
+    playbackModeButton.classList.remove(
+      "playback-active"
+    );
+
+
+    liveStatus.textContent =
+      currentCctvPublicUrl
+        ? "Ready"
+        : "Menunggu URL";
+
+  }
+
+
+  /* ============================================================
+     SHOW PLAYBACK
+     ============================================================ */
+
+  function showPlayback() {
+
+    stopLive();
+
+
+    currentMode =
+      "playback";
+
+
+    liveView.style.display =
+      "none";
+
+    playbackView.style.display =
+      "flex";
+
+
+    liveModeButton.classList.remove(
+      "live-active"
+    );
+
+    playbackModeButton.classList.add(
+      "playback-active"
+    );
+
+
+    playbackStatus.textContent =
+      currentPlaybackPublicUrl
+        ? "Pilih jam mulai dan selesai"
+        : "Menunggu playback_public_url";
+
+  }
+
+
+  /* ============================================================
+     FULLSCREEN
+     ============================================================ */
+
+  async function toggleFullscreen() {
+
+    try {
+
+      const active =
+        (
+          document.fullscreenElement ===
+            root
+        ) ||
+        (
+          document.webkitFullscreenElement ===
+            root
+        );
+
+
+      if (active) {
+
+        if (
+          document.exitFullscreen
+        ) {
+
+          await document.exitFullscreen();
+
+        }
+
+        else if (
+          document.webkitExitFullscreen
+        ) {
+
+          document.webkitExitFullscreen();
+
+        }
+
+
+        return;
+
+      }
+
+
+      if (
+        root.requestFullscreen
+      ) {
+
+        await root.requestFullscreen();
+
+      }
+
+      else if (
+        root.webkitRequestFullscreen
+      ) {
+
+        root.webkitRequestFullscreen();
+
+      }
+
+    }
+
+    catch (error) {
+
+      console.error(
+        "[FULLSCREEN]",
+        error
+      );
+
+    }
+
+  }
+
+
+  /* ============================================================
+     EVENTS
+     ============================================================ */
+  /* ============================================================
+     ALARM CONTROL
+     ============================================================ */
+
+  alarmToggleButton.addEventListener(
+    "click",
+    async () => {
+
+      if (!currentAlarmPublicUrl) {
+        alarmStatus.textContent =
+          "URL alarm belum tersedia";
+
+        return;
+      }
+
+      const currentOn =
+        alarmToggleButton.classList.contains(
+          "alarm-on"
+        );
+
+      const requestedState =
+        currentOn ? "OFF" : "ON";
+
+      alarmToggleButton.disabled = true;
+
+      alarmStatus.textContent =
+        requestedState === "ON"
+          ? "Mengaktifkan..."
+          : "Mematikan...";
+
+      try {
+
+        const response =
+          await fetch(
+            `${currentAlarmPublicUrl}/api/alarm`,
+            {
+              method: "POST",
+
+              headers: {
+                "Content-Type":
+                  "application/json",
+
+                Authorization:
+                  `Bearer ${alarmToken}`
+              },
+
+              body: JSON.stringify({
+                state: requestedState
+              }),
+
+              cache: "no-store"
+            }
+          );
+
+        const data =
+          await response
+            .json()
+            .catch(() => ({}));
+
+        if (!response.ok || !data.ok) {
+          throw new Error(
+            data.error ||
+            data.details ||
+            `HTTP ${response.status}`
+          );
+        }
+
+        console.log(
+          "[ALARM COMMAND]",
+          {
+            requestedState,
+            result: data
+          }
+        );
+
+        alarmStatus.textContent =
+          requestedState === "ON"
+            ? "Perintah ON berhasil"
+            : "Perintah OFF berhasil";
+
+        /*
+         * Tunggu telemetry berikutnya untuk
+         * mengonfirmasi state_alarm sebenarnya.
+         */
+        setTimeout(
+          updateTelemetry,
+          500
+        );
+
+      }
+      catch (error) {
+
+        console.error(
+          "[ALARM COMMAND]",
+          error
+        );
+
+        alarmStatus.textContent =
+          `Gagal: ${error.message}`;
+
+      }
+
+      finally {
+
+        alarmToggleButton.disabled =
+          false;
+
+      }
+
+    }
+  );
+  $("big-live-play")
+    .addEventListener(
+      "click",
+      startLive
+    );
+
+
+  $("live-play")
+    .addEventListener(
+      "click",
+      startLive
+    );
+
+
+  $("live-stop")
+    .addEventListener(
+      "click",
+      stopLive
+    );
+
+
+  liveModeButton
+    .addEventListener(
+      "click",
+      showLive
+    );
+
+
+  playbackModeButton
+    .addEventListener(
+      "click",
+      showPlayback
+    );
+
+
+  playRecordButton
+    .addEventListener(
+      "click",
+      playRecording
+    );
+
+
+  $("stop-record")
+    .addEventListener(
+      "click",
+      async () => {
+
+        playbackStatus.textContent =
+          "Menghentikan playback...";
+
+
+        await stopPlayback(
+          true
+        );
+
+
+        playbackStatus.textContent =
+          "Stopped";
+
+      }
+    );
+
+
+  downloadButton
+    .addEventListener(
+      "click",
+      downloadRecording
+    );
+
+
+  fullscreenButton
+    .addEventListener(
+      "click",
+      toggleFullscreen
+    );
+
+
+  /* ============================================================
+     PLAYBACK EVENTS
+     ============================================================ */
+
+  playbackVideo.addEventListener(
+    "playing",
+    () => {
+
+      playbackStatus.textContent =
+        Number.isFinite(
+          playbackVideo.duration
+        )
+          ? `Playback · ${formatDuration(playbackVideo.duration)}`
+          : "Playback";
+
+    }
+  );
+
+
+  playbackVideo.addEventListener(
+    "waiting",
+    () => {
+
+      playbackStatus.textContent =
+        "Buffering...";
+
+    }
+  );
+
+
+  playbackVideo.addEventListener(
+    "ended",
+    async () => {
+
+      playbackStatus.textContent =
+        "Selesai · melepas session...";
+
+
+      await stopPlaybackServer();
+
+
+      playbackStatus.textContent =
+        "Selesai · siap download";
+
+    }
+  );
+
+
+  playbackVideo.addEventListener(
+    "error",
+    () => {
+
+      if (
+        playbackVideo.currentSrc
+      ) {
+
+        console.error(
+          "[PLAYBACK VIDEO ERROR]",
+          playbackVideo.error
+        );
+
+
+        playbackStatus.textContent =
+          "Playback error";
+
+      }
+
+    }
+  );
+
+
+  /* ============================================================
+     INITIALIZE
+     ============================================================ */
+
+  updateTelemetry();
+
+
+  telemetryTimer =
+    setInterval(
+      updateTelemetry,
+      TELEMETRY_INTERVAL
+    );
+
+
+  stopLive();
+
+
+  playbackStatus.textContent =
+    "Pilih jam mulai dan selesai";
+
+
+  /* ============================================================
+     CLEANUP
+     ============================================================ */
+
+  return () => {
+
+    destroyed =
+      true;
+
+
+    if (telemetryTimer) {
+
+      clearInterval(
+        telemetryTimer
+      );
+
+    }
+
+
+    stopLive();
+
+
+    resetPlaybackPlayer();
+
+
+    if (playbackStopUrl) {
+
+      const stopUrl =
+        playbackStopUrl;
+
+
+      playbackStopUrl =
+        "";
+
+
+      try {
+
+        fetch(
+          stopUrl,
+          {
+            method:
+              "GET",
+
+            headers:
+              authHeaders(),
+
+            cache:
+              "no-store",
+
+            keepalive:
+              true
+          }
+        );
+
+      }
+
+      catch (_) {
+      }
+
+    }
+
+
+    container.innerHTML =
+      "";
+
+  };
+
+}
